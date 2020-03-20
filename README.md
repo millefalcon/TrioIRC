@@ -1,1 +1,1 @@
-# A simple IRC Client using trio
+# A simple IRC Framework using trio

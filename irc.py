@@ -1,4 +1,5 @@
 import socket
+import signal
 import logging
 
 from typing import Tuple, List
@@ -42,7 +43,7 @@ class IRCBase:
     _attempted_nick = ''
     hostname = None
     heartbeat_interval = 120
-    def __init__(self, host: str=None, port: int=None, channel_name: str="#newchan"):
+    def __init__(self, host: str=None, port: int=None, channel_name: str="#dummychannel"):
         self.host = host
         self.port = port
         self.channel_name = channel_name
@@ -55,6 +56,7 @@ class IRCBase:
         self.logger.info(f'connection made to {self.address}')
         if self.hostname is None:
             self.hostname = socket.getfqdn()
+        await self._send_identify()
 
     async def _data_received(self, data: bytes):
         data = data.decode("utf-8")
@@ -138,17 +140,48 @@ class IRCBase:
             await trio.sleep(self.heartbeat_interval)
             await self.send_message("PONG", self.hostname)
 
+    async def _handle_data(self, nursery):
+        buffer = b""
+        while True:
+            if not self.socket._sock._closed:
+                data = await self.socket.recv(self.bufsize)
+                if not data:
+                    break
+                buffer += data
+                pts = buffer.split(b'\n')
+                buffer = pts.pop()
+                for el in pts:
+                    nursery.start_soon(self._data_received, el)
+            else:
+                break
+        await self.connection_lost()
+
+    async def _handle_signal(self, cancel_scope):
+        with trio.open_signal_receiver(signal.SIGINT) as signal_aiter:
+            async for signum in signal_aiter:
+                if signum == signal.SIGINT:
+                    cancel_scope.cancel()
+
+
     async def connect(self) -> None:
         with trio.socket.socket() as client_sock:
             self.socket = client_sock
-            #self.address = await self.socket.resolve_remote_address((self.host, self.port))
-            self.address = await trio.socket.getaddrinfo(self.host, self.port)
+            #self.address = await trio.socket.getaddrinfo(self.host, self.port)
             self.address = (self.host, self.port)
             #await self.socket.connect(self.address[0][-1])
             await self.socket.connect(self.address)
-            #await self._send_identify()
+            await self.connection_made()
+            await self._join(self.channel_name)
             buffer = b''
             async with trio.open_nursery() as nursery:
+                nursery.start_soon(self._handle_signal, nursery.cancel_scope)
+
+                #nursery.start_soon(self.connection_made)
+                #nursery.start_soon(self._join, self.channel_name)
+                nursery.start_soon(self._start_heartbeat)
+                nursery.start_soon(self._handle_data, nursery)
+
+                """
                 try:
                     nursery.start_soon(self.connection_made)
                     await self._send_identify()
@@ -167,30 +200,14 @@ class IRCBase:
                         else:
                             break
                     nursery.start_soon(self.connection_lost)
+                    nursery.start_soon(self._handle_data, nursery)
                 except KeyboardInterrupt as interrupt:
                     print('exiting...')
                     nursery.cancel_scope.cancel()
+                """
 
     def run(self):
         trio.run(self.connect)
-
-
-class IRCClient(IRCBase):
-    nickname = 'triobot'
-    async def irc_JOIN(self, prefix, params):
-        self.logger.info(f"[JOIN] - {prefix} - {params}")
-
-    async def irc_PRIVMSG(self, prefix, params):
-        self.logger.info(f"[PRIVMSG] - {prefix} - {params}")
-
-    async def irc_QUIT(self, prefix, params):
-        self.logger.info(f"[QUIT]  - {prefix} - {params}")
-
-
-class Client(IRCClient):
-    def __init__(self, host, port, chan):
-        super().__init__(host, port, chan)
-        print(self.host, self.port)
 
 
 symbolic_to_numeric = {
@@ -342,7 +359,28 @@ for k, v in symbolic_to_numeric.items():
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
+    class IRCClient(IRCBase):
+        nickname = 'triobot'
+        def __init__(self, host, port, chan):
+            super().__init__(host, port, chan)
+            print(self.host, self.port)
+        async def _data_received(self, data):
+            self.logger.info("data > " + data.decode('utf-8'))
+            await super()._data_received(data)
+
+        async def irc_JOIN(self, prefix, params):
+            1/0
+            self.logger.info(f"[JOIN] - {prefix} - {params}")
+
+        async def irc_PRIVMSG(self, prefix, params):
+            self.logger.info(f"[PRIVMSG] - {prefix} - {params}")
+
+        async def irc_QUIT(self, prefix, params):
+            self.logger.info(f"[QUIT]  - {prefix} - {params}")
+
+
     host, port = ('irc.freenode.net', 6667)
-    c = Client(host, port, '#bash')
+    #c = IRCClient(host, port, '#bash')
+    c = IRCClient(host, port, '#dummychannel')
     c.run()
 

@@ -67,9 +67,12 @@ class IRCBase:
         message = ' '.join(parts) + '\r\n'
         await self.stream.send_all(message.encode('utf-8'))
 
-    async def parse(self, data: bytes):
-        data = data.decode('utf-8')
-        for line in data.split('\n'):
+    async def parse(self, bdata: bytes):
+        bdata = bdata.split(b'\n')
+        bdata.pop()
+        bdata = b' '.join(bdata)
+        data = bdata.decode('utf-8')
+        for line in data.split('\r\n'):
             if not line: continue
             if len(line) <= 2:
                 # This is a blank line, at best.
@@ -79,19 +82,26 @@ class IRCBase:
             yield parsemsg(line)
             await trio.sleep(0)
 
-    async def read_and_parse_next_event(self, stream):
+    async def _read_and_parse_next_event(self, stream):
         async with stream:
-            async for data in stream:
-                #print("data >", data)
-                async for prefix, command, params in self.parse(data):
-                    if command in numeric_to_symbolic:
-                        command = numeric_to_symbolic[command]
-                    yield Event(command, prefix, params)
+            try:
+                async for data in stream:
+                    #print("data >", data)
+                    async for prefix, command, params in self.parse(data):
+                        if command in numeric_to_symbolic:
+                            command = numeric_to_symbolic[command]
+                        yield Event(command, prefix, params)
+            except trio.ClosedResourceError:
+                yield Event('DISCONNECT', None, None)
 
     async def events(self):
-        async for event in self.read_and_parse_next_event(self.stream):
-            #yield event.type, event.prefix, event.params
+        async for event in self._read_and_parse_next_event(self.stream):
             yield event
+
+    async def disconnect(self):
+        await self.stream.send_eof()
+        await self.stream.aclose()
+        #await self.stream.send_eof()
 
 
 symbolic_to_numeric = {
@@ -249,7 +259,7 @@ if __name__ == '__main__':
         await irc.connect()
         await irc._join(channel)
         async for event in irc.events():
-            print(event)
+            #print(event)
             if event.type == 'ERR_NICKNAMEINUSE':
                 await irc.set_nick(irc.nickname + '_')
                 await irc._join(channel)

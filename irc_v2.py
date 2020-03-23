@@ -4,6 +4,13 @@ import trio
 
 from typing import Tuple, List
 
+
+CR = chr(0o15)
+
+class IRCBadMessage(Exception):
+    pass
+
+
 @attr.s(auto_attribs=True, slots=True)
 class Event:
     type: str = ""
@@ -20,7 +27,7 @@ def parsemsg(s: str) -> Tuple[str, str, List]:
     trailing = []
     if not s:
         raise IRCBadMessage("Empty line.")
-    if s[0:1] == ':':
+    if s[0:1] == ':' and ' ' in s[1:]:
         prefix, s = s[1:].split(' ', 1)
     if s.find(' :') != -1:
         s, trailing = s.split(' :', 1)
@@ -32,7 +39,6 @@ def parsemsg(s: str) -> Tuple[str, str, List]:
     return prefix, command, args
 
 
-CR = chr(0o15)
 class IRCBase:
     nickname = 'tribot'
     def __init__(self, host, port, chan='#dummychan'):
@@ -41,38 +47,14 @@ class IRCBase:
         self.chan = chan
         self.logger = logging.getLogger(__file__)
 
-
     async def connect(self):
         stream = await trio.open_tcp_stream(self.host, self.port)
         self.stream = stream
-        await self._identify()
 
-    async def _identify(self):
-        await self.send_message("NICK", self.nickname)
-        await self.send_message('USER', self.nickname, '-', '-', f'{self.nickname} Python IRC bot')
-
-    def _alter_collided_nick(self, nickname):
-        return nickname + '_'
-
-    async def set_nick(self, nickname):
-        self.logger.info(f"setting nick to {nickname}")
-        self._attempted_nick = nickname
-        await self.send_message("NICK", nickname)
-
-    async def _join(self, channel):
-        await self.send_message("JOIN", channel)
-
-    async def send_message(self, command, *args):
-        parts = [command] + list(args)
-        message = ' '.join(parts) + '\r\n'
-        await self.stream.send_all(message.encode('utf-8'))
-
-    async def parse(self, bdata: bytes):
-        bdata = bdata.split(b'\n')
-        bdata.pop()
-        bdata = b' '.join(bdata)
+    async def _parse(self, bdata: bytes):
         data = bdata.decode('utf-8')
-        for line in data.split('\r\n'):
+        data = data.split('\r\n')
+        for line in data:
             if not line: continue
             if len(line) <= 2:
                 # This is a blank line, at best.
@@ -86,8 +68,7 @@ class IRCBase:
         async with stream:
             try:
                 async for data in stream:
-                    #print("data >", data)
-                    async for prefix, command, params in self.parse(data):
+                    async for prefix, command, params in self._parse(data):
                         if command in numeric_to_symbolic:
                             command = numeric_to_symbolic[command]
                         yield Event(command, prefix, params)
@@ -99,7 +80,12 @@ class IRCBase:
             yield event
 
     async def disconnect(self):
-        await self.stream.send_eof()
+        """
+        `send_eof` will probably cause the other end to close the connection too, but it's not available always 
+        (e.g. if you're connecting over TLS), and most programs treat it the same as if you simply closed the connection.
+        The simplest approach is just to call `await stream.aclose()`, and that will cause any ongoing or future `receive_some`
+        calls to `raise trio.ClosedResourceError`
+        """
         await self.stream.aclose()
         #await self.stream.send_eof()
 
@@ -251,17 +237,70 @@ numeric_to_symbolic = {}
 for k, v in symbolic_to_numeric.items():
     numeric_to_symbolic[v] = k
 
+@attr.s(auto_attribs=True)
+class IRCClient(IRCBase):
+    nickname = "tribot"
+    hostname = ""
+    _attempted_nick = ''
+
+    host: str = ""
+    port: int = 6667
+    channel: str = "#dummychan"
+    def __attrs__post_init__(self):
+        super().__init__(self, self.host, self.port, self.channel)
+
+    async def connect(self):
+        if self.hostname is None:
+            self.hostname = socket.getfqdn()
+        await super().connect()
+        await self._identify()
+
+    async def _identify(self):
+        await self.send_message("NICK", self.nickname)
+        await self.send_message('USER', self.nickname, '-', '-', f'{self.nickname} Python IRC bot')
+
+    def _alter_collided_nick(self, nickname):
+        return self.nickname + '_'
+
+    async def set_nick(self, nickname):
+        self._attempted_nick = nickname
+        await self.send_message("NICK", nickname)
+
+    async def join(self, channel):
+        await self.send_message("JOIN", channel)
+
+    async def send_message(self, command, *args):
+        parts = [command] + list(args)
+        message = ' '.join(parts) + '\r\n'
+        await self.stream.send_all(message.encode('utf-8'))
+
+    async def handle_nicknameinuse(self, prefix, params):
+        self._attempted_nick = self._alter_collided_nick(self._attempted_nick)
+        await self.set_nick(self._attempted_nick)
+        await self.join(self.channel)
+
+
+
 if __name__ == '__main__':
     async def main():
+        async def start_heartbeat(client, interval):
+            print("sending heartbeat...")
+            while True:
+                await trio.sleep(interval)
+                await client.send_message("PONG", client.hostname)
+
         logging.basicConfig(level=logging.DEBUG)
         host, port, channel = ("irc.freenode.net", 6667, "#bash")
-        irc = IRCBase(host, port)
-        await irc.connect()
-        await irc._join(channel)
-        async for event in irc.events():
-            #print(event)
-            if event.type == 'ERR_NICKNAMEINUSE':
-                await irc.set_nick(irc.nickname + '_')
-                await irc._join(channel)
+        client = IRCClient(host, port, channel)
+        await client.connect()
+        await client.join(channel)
+        interval = 120
+        async with trio.open_nursery() as nursery:
+            nursery.start_soon(start_heartbeat, client, interval)
+            async for event in client.events():
+                print(event)
+                if event.type == 'ERR_NICKNAMEINUSE':
+                    await client.handle_nicknameinuse(event.prefix, event.params)
+
 
     trio.run(main)

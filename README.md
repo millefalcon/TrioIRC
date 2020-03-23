@@ -4,7 +4,7 @@ A simple IRC framework using trio.
 
 ## Getting Started
 
-    ```
+```python3
     async def main():
         async def start_heartbeat(client, interval):
             print("sending heartbeat...")
@@ -24,7 +24,7 @@ A simple IRC framework using trio.
                 print(event)
                 if event.type == 'ERR_NICKNAMEINUSE':
                     await client.handle_nicknameinuse(event.prefix, event.params)
-    ```
+```
 
 ### Prerequisites
 

@@ -5,25 +5,24 @@ A simple IRC framework using trio.
 ## Getting Started
 
 ```python3
-    async def main():
-        async def start_heartbeat(client, interval):
-            print("sending heartbeat...")
-            while True:
-                await trio.sleep(interval)
-                await client.send_message("PONG", client.hostname)
+async def main():
+    async def start_heartbeat(client, interval):
+        print("sending heartbeat...")
+        while True:
+            await trio.sleep(interval)
+            await client.send_message("PONG", client.hostname)
 
-        logging.basicConfig(level=logging.DEBUG)
-        host, port, channel = ("irc.freenode.net", 6667, "#bash")
-        client = IRCClient(host, port, channel)
-        await client.connect()
-        await client.join(channel)
-        interval = 120
-        async with trio.open_nursery() as nursery:
-            nursery.start_soon(start_heartbeat, client, interval)
-            async for event in client.events():
-                print(event)
-                if event.type == 'ERR_NICKNAMEINUSE':
-                    await client.handle_nicknameinuse(event.prefix, event.params)
+    host, port, channel = ("irc.freenode.net", 6667, "#bash")
+    client = IRCClient(host, port, channel)
+    await client.connect()
+    await client.join(channel)
+    interval = 120
+    async with trio.open_nursery() as nursery:
+        nursery.start_soon(start_heartbeat, client, interval)
+        async for event in client.events():
+        print(event)
+        if event.type == 'ERR_NICKNAMEINUSE':
+            await client.handle_nicknameinuse(event.prefix, event.params)
 ```
 
 ### Prerequisites

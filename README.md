@@ -20,9 +20,9 @@ async def main():
     async with trio.open_nursery() as nursery:
         nursery.start_soon(start_heartbeat, client, interval)
         async for event in client.events():
-        print(event)
-        if event.type == 'ERR_NICKNAMEINUSE':
-            await client.handle_nicknameinuse(event.prefix, event.params)
+            print(event)
+            if event.type == 'ERR_NICKNAMEINUSE':
+                await client.handle_nicknameinuse(event.prefix, event.params)
 ```
 
 ### Prerequisites

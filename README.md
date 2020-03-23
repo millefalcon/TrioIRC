@@ -4,7 +4,7 @@ A simple IRC framework using trio.
 
 ## Getting Started
 
-```
+    ```
     async def main():
         async def start_heartbeat(client, interval):
             print("sending heartbeat...")
@@ -24,7 +24,7 @@ A simple IRC framework using trio.
                 print(event)
                 if event.type == 'ERR_NICKNAMEINUSE':
                     await client.handle_nicknameinuse(event.prefix, event.params)
-```
+    ```
 
 ### Prerequisites
 
@@ -62,6 +62,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Acknowledgments
 
-* Thanks to [twisted](https://github.com/twisted/twisted) for getting me started on making IRC bots and the code that parses the data.
+* Thanks to [twisted](https://github.com/twisted/twisted) for getting me started in writing IRC bots and the code that parses the data.
 * Thanks to [Henry](https://github.com/henry232323), whose [trioyoyo](https://github.com/henry232323/trioyoyo) implementation for inspiration.
 * Thanks to [Nathaniel J. Smith] (https://github.com/njsmith) for the [trio](https://github.com/python-trio/trio), his help and insights.

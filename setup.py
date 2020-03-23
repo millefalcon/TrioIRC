@@ -4,7 +4,7 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 setuptools.setup(
-    name="trio-irc", # Replace with your own username
+    name="trioirc",
     version="0.0.1",
     author="han-solo",
     author_email="hanish0019@gmail.com",

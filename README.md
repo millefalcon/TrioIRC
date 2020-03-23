@@ -5,6 +5,8 @@ A simple IRC framework using trio.
 ## Getting Started
 
 ```python3
+from irc import IRCClient
+
 async def main():
     async def start_heartbeat(client, interval):
         print("sending heartbeat...")

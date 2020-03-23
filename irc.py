@@ -80,12 +80,10 @@ class IRCBase:
             yield event
 
     async def disconnect(self):
-        """
-        `send_eof` will probably cause the other end to close the connection too, but it's not available always 
-        (e.g. if you're connecting over TLS), and most programs treat it the same as if you simply closed the connection.
-        The simplest approach is just to call `await stream.aclose()`, and that will cause any ongoing or future `receive_some`
-        calls to `raise trio.ClosedResourceError`
-        """
+        # `send_eof` will probably cause the other end to close the connection too, but it's not available always 
+        # (e.g. if you're connecting over TLS), and most programs treat it the same as if you simply closed the connection.
+        # The simplest approach is just to call `await stream.aclose()`, and that will cause any ongoing or future `receive_some`
+        # calls to `raise trio.ClosedResourceError`
         await self.stream.aclose()
         #await self.stream.send_eof()
 

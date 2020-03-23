@@ -1,29 +1,33 @@
-import socket
-import signal
 import logging
+import attr
+import trio
 
 from typing import Tuple, List
-import trio
 
 
 CR = chr(0o15)
+
+class IRCBadMessage(Exception):
+    pass
+
+
+@attr.s(auto_attribs=True, slots=True)
+class Event:
+    type: str = ""
+    prefix: str = ""
+    params: List = []
+
 
 def parsemsg(s: str) -> Tuple[str, str, List]:
     """
     Breaks a message from an IRC server into its prefix, command, and
     arguments.
-
-    @param s: The message to break.
-    @type s: L{bytes}
-
-    @return: A tuple of (prefix, command, args).
-    @rtype: L{tuple}
     """
     prefix = ''
     trailing = []
     if not s:
         raise IRCBadMessage("Empty line.")
-    if s[0:1] == ':':
+    if s[0:1] == ':' and ' ' in s[1:]:
         prefix, s = s[1:].split(' ', 1)
     if s.find(' :') != -1:
         s, trailing = s.split(' :', 1)
@@ -35,179 +39,55 @@ def parsemsg(s: str) -> Tuple[str, str, List]:
     return prefix, command, args
 
 
-CR = chr(0o15)
-
-
 class IRCBase:
     nickname = 'tribot'
-    _attempted_nick = ''
-    hostname = None
-    heartbeat_interval = 120
-    def __init__(self, host: str=None, port: int=None, channel_name: str="#dummychannel"):
+    def __init__(self, host, port, chan='#dummychan'):
         self.host = host
         self.port = port
-        self.channel_name = channel_name
-        self.bufsize = 1024
-        self.address = None
+        self.chan = chan
         self.logger = logging.getLogger(__file__)
-        self.logger.setLevel(logging.INFO)
 
-    async def connection_made(self):
-        self.logger.info(f'connection made to {self.address}')
-        if self.hostname is None:
-            self.hostname = socket.getfqdn()
-        await self._send_identify()
+    async def connect(self):
+        stream = await trio.open_tcp_stream(self.host, self.port)
+        self.stream = stream
 
-    async def _data_received(self, data: bytes):
-        data = data.decode("utf-8")
-        for line in data.split('\r\n'):
+    async def _parse(self, bdata: bytes):
+        data = bdata.decode('utf-8')
+        data = data.split('\r\n')
+        for line in data:
+            if not line: continue
             if len(line) <= 2:
                 # This is a blank line, at best.
                 continue
             if line[-1] == CR:
                 line = line[:-1]
-            prefix, command, params = parsemsg(line)
-            if command in numeric_to_symbolic:
-                command = numeric_to_symbolic[command]
-            await self._handle_command(command, prefix, params)
+            yield parsemsg(line)
+            await trio.sleep(0)
 
-    async def _handle_command(self, command, prefix, params):
-        method = getattr(self, "irc_%s" % command, None)
-        #self.logger.info(f"[command] > {method} {command} {prefix} {params}")
-        try:
-            if method is not None:
-                await method(prefix, params)
-            else:
-                self.irc_unknown(prefix, command, params)
-        except:
-            # log
-            pass
+    async def _read_and_parse_next_event(self, stream):
+        async with stream:
+            try:
+                async for data in stream:
+                    async for prefix, command, params in self._parse(data):
+                        if command in numeric_to_symbolic:
+                            command = numeric_to_symbolic[command]
+                        yield Event(command, prefix, params)
+            except trio.ClosedResourceError:
+                yield Event('DISCONNECT', None, None)
 
-    def irc_unknown(self, prefix, command, params):
+    async def events(self):
+        async for event in self._read_and_parse_next_event(self.stream):
+            yield event
+
+    async def disconnect(self):
         """
-        Called by L{handleCommand} on a command that doesn't have a defined
-        handler. Subclasses should override this method.
+        `send_eof` will probably cause the other end to close the connection too, but it's not available always 
+        (e.g. if you're connecting over TLS), and most programs treat it the same as if you simply closed the connection.
+        The simplest approach is just to call `await stream.aclose()`, and that will cause any ongoing or future `receive_some`
+        calls to `raise trio.ClosedResourceError`
         """
-        raise NotImplementedError(command, prefix, params)
-    
-    async def irc_ERR_NICKNAMEINUSE(self, prefix, params):
-        """
-        Called when we try to register or change to a nickname that is already
-        taken.
-        """
-        self._attempted_nick = self.alter_collided_nick(self._attempted_nick)
-        await self.set_nick(self._attempted_nick)
-        await self.join(self.channel_name)
-
-    def _alter_collided_nick(self, nickname):
-        return nickname + '_'
-
-    async def set_nick(self, nickname):
-        self.logger.info(f"setting nick to {nickname}")
-        self._attempted_nick = nickname
-        await self.send_message("NICK", nickname)
-
-    async def connection_lost(self):
-        self.logger.info(f'connection lost from {self.address}')
-        
-    def _render(self, command, *args):
-        """String representation of an IRC message.  DOES NOT include the
-        trailing newlines.
-        """
-        parts = [command] + list(*args)
-        # TODO assert no spaces
-        # TODO assert nothing else begins with colon!
-        if args and ' ' in parts[-1]:
-            parts[-1] = ':' + parts[-1]
-        #print(parts)
-        return ' '.join(parts)
-
-    async def send_message(self, command, *args):
-        message = self._render(command, args).encode('utf-8')
-        await self.socket.send(message + b'\r\n')
-
-    async def _send_identify(self):
-        await self.set_nick(self.nickname)
-        await self.send_message('USER', 'trirc', '-', '-', 'trirc Python IRC bot')
-
-    async def _join(self, channel):
-        await trio.sleep(1)
-        await self.send_message('JOIN', channel)
-
-    async def _start_heartbeat(self):
-        self.logger.info("sending heart beat")
-        while True:
-            await trio.sleep(self.heartbeat_interval)
-            await self.send_message("PONG", self.hostname)
-
-    async def _handle_data(self, nursery):
-        buffer = b""
-        while True:
-            if not self.socket._sock._closed:
-                data = await self.socket.recv(self.bufsize)
-                if not data:
-                    break
-                buffer += data
-                pts = buffer.split(b'\n')
-                buffer = pts.pop()
-                for el in pts:
-                    nursery.start_soon(self._data_received, el)
-            else:
-                break
-        await self.connection_lost()
-
-    async def _handle_signal(self, cancel_scope):
-        with trio.open_signal_receiver(signal.SIGINT) as signal_aiter:
-            async for signum in signal_aiter:
-                if signum == signal.SIGINT:
-                    cancel_scope.cancel()
-
-
-    async def connect(self) -> None:
-        with trio.socket.socket() as client_sock:
-            self.socket = client_sock
-            #self.address = await trio.socket.getaddrinfo(self.host, self.port)
-            self.address = (self.host, self.port)
-            #await self.socket.connect(self.address[0][-1])
-            await self.socket.connect(self.address)
-            await self.connection_made()
-            await self._join(self.channel_name)
-            buffer = b''
-            async with trio.open_nursery() as nursery:
-                nursery.start_soon(self._handle_signal, nursery.cancel_scope)
-
-                #nursery.start_soon(self.connection_made)
-                #nursery.start_soon(self._join, self.channel_name)
-                nursery.start_soon(self._start_heartbeat)
-                nursery.start_soon(self._handle_data, nursery)
-
-                """
-                try:
-                    nursery.start_soon(self.connection_made)
-                    await self._send_identify()
-                    nursery.start_soon(self._join, self.channel_name)
-                    nursery.start_soon(self._start_heartbeat)
-                    while True:
-                        if not self.socket._sock._closed:
-                            data = await self.socket.recv(self.bufsize)
-                            if not data:
-                                break
-                            buffer += data
-                            pts = buffer.split(b'\n')
-                            buffer = pts.pop()
-                            for el in pts:
-                                nursery.start_soon(self._data_received, el)
-                        else:
-                            break
-                    nursery.start_soon(self.connection_lost)
-                    nursery.start_soon(self._handle_data, nursery)
-                except KeyboardInterrupt as interrupt:
-                    print('exiting...')
-                    nursery.cancel_scope.cancel()
-                """
-
-    def run(self):
-        trio.run(self.connect)
+        await self.stream.aclose()
+        #await self.stream.send_eof()
 
 
 symbolic_to_numeric = {
@@ -357,30 +237,70 @@ numeric_to_symbolic = {}
 for k, v in symbolic_to_numeric.items():
     numeric_to_symbolic[v] = k
 
+@attr.s(auto_attribs=True)
+class IRCClient(IRCBase):
+    nickname = "tribot"
+    hostname = ""
+    _attempted_nick = ''
+
+    host: str = ""
+    port: int = 6667
+    channel: str = "#dummychan"
+    def __attrs__post_init__(self):
+        super().__init__(self, self.host, self.port, self.channel)
+
+    async def connect(self):
+        if self.hostname is None:
+            self.hostname = socket.getfqdn()
+        await super().connect()
+        await self._identify()
+
+    async def _identify(self):
+        await self.send_message("NICK", self.nickname)
+        await self.send_message('USER', self.nickname, '-', '-', f'{self.nickname} Python IRC bot')
+
+    def _alter_collided_nick(self, nickname):
+        return self.nickname + '_'
+
+    async def set_nick(self, nickname):
+        self._attempted_nick = nickname
+        await self.send_message("NICK", nickname)
+
+    async def join(self, channel):
+        await self.send_message("JOIN", channel)
+
+    async def send_message(self, command, *args):
+        parts = [command] + list(args)
+        message = ' '.join(parts) + '\r\n'
+        await self.stream.send_all(message.encode('utf-8'))
+
+    async def handle_nicknameinuse(self, prefix, params):
+        self._attempted_nick = self._alter_collided_nick(self._attempted_nick)
+        await self.set_nick(self._attempted_nick)
+        await self.join(self.channel)
+
+
+
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
-    class IRCClient(IRCBase):
-        nickname = 'triobot'
-        def __init__(self, host, port, chan):
-            super().__init__(host, port, chan)
-            print(self.host, self.port)
-        async def _data_received(self, data):
-            self.logger.info("data > " + data.decode('utf-8'))
-            await super()._data_received(data)
+    async def main():
+        async def start_heartbeat(client, interval):
+            print("sending heartbeat...")
+            while True:
+                await trio.sleep(interval)
+                await client.send_message("PONG", client.hostname)
 
-        async def irc_JOIN(self, prefix, params):
-            1/0
-            self.logger.info(f"[JOIN] - {prefix} - {params}")
+        logging.basicConfig(level=logging.DEBUG)
+        host, port, channel = ("irc.freenode.net", 6667, "#bash")
+        client = IRCClient(host, port, channel)
+        await client.connect()
+        await client.join(channel)
+        interval = 120
+        async with trio.open_nursery() as nursery:
+            nursery.start_soon(start_heartbeat, client, interval)
+            async for event in client.events():
+                print(event)
+                if event.type == 'ERR_NICKNAMEINUSE':
+                    await client.handle_nicknameinuse(event.prefix, event.params)
 
-        async def irc_PRIVMSG(self, prefix, params):
-            self.logger.info(f"[PRIVMSG] - {prefix} - {params}")
 
-        async def irc_QUIT(self, prefix, params):
-            self.logger.info(f"[QUIT]  - {prefix} - {params}")
-
-
-    host, port = ('irc.freenode.net', 6667)
-    #c = IRCClient(host, port, '#bash')
-    c = IRCClient(host, port, '#dummychannel')
-    c.run()
-
+    trio.run(main)

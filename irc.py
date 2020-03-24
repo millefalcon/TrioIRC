@@ -41,10 +41,9 @@ def parsemsg(s: str) -> Tuple[str, str, List]:
 
 class IRCBase:
     nickname = 'tribot'
-    def __init__(self, host, port, chan='#dummychan'):
+    def __init__(self, host, port):
         self.host = host
         self.port = port
-        self.chan = chan
         self.logger = logging.getLogger(__file__)
 
     async def connect(self):
@@ -72,8 +71,10 @@ class IRCBase:
                         if command in numeric_to_symbolic:
                             command = numeric_to_symbolic[command]
                         yield Event(command, prefix, params)
-            except trio.ClosedResourceError:
-                yield Event('DISCONNECT', None, None)
+            #except trio.ClosedResourceError:
+            #    yield Event('DISCONNECT', None, None)
+            except Exception as e:
+                print("****** err", e)
 
     async def events(self):
         async for event in self._read_and_parse_next_event(self.stream):
@@ -240,12 +241,13 @@ class IRCClient(IRCBase):
     nickname = "tribot"
     hostname = ""
     _attempted_nick = ''
+    _heartbeat_interval = 120
 
     host: str = ""
     port: int = 6667
-    channel: str = "#dummychan"
+    #channel: str = "#dummychan"
     def __attrs__post_init__(self):
-        super().__init__(self, self.host, self.port, self.channel)
+        super().__init__(self, self.host, self.port)
 
     async def connect(self):
         if self.hostname is None:
@@ -270,35 +272,42 @@ class IRCClient(IRCBase):
     async def send_message(self, command, *args):
         parts = [command] + list(args)
         message = ' '.join(parts) + '\r\n'
+        print("msg >", repr(message))
         await self.stream.send_all(message.encode('utf-8'))
 
-    async def handle_nicknameinuse(self, prefix, params):
+    async def handle_nicknameinuse(self):
         self._attempted_nick = self._alter_collided_nick(self._attempted_nick)
         await self.set_nick(self._attempted_nick)
-        await self.join(self.channel)
 
+    async def _start_heartbeat(self):
+        print("sending heartbeat...")
+        while True:
+            await trio.sleep(self._heartbeat_interval)
+            await self.send_message("PONG", self.hostname)
+
+    async def events(self):
+        async with trio.open_nursery() as nursery:
+            nursery.start_soon(self._start_heartbeat)
+            async for event in super().events():
+                yield event
 
 
 if __name__ == '__main__':
     async def main():
-        async def start_heartbeat(client, interval):
-            print("sending heartbeat...")
-            while True:
-                await trio.sleep(interval)
-                await client.send_message("PONG", client.hostname)
-
         logging.basicConfig(level=logging.DEBUG)
-        host, port, channel = ("irc.freenode.net", 6667, "#bash")
-        client = IRCClient(host, port, channel)
+        #host, port, channel = ("irc.freenode.net", 6667, "#bash")
+        host, port, channel = ("irc.freenode.net", 6667, "#dummychan")
+        client = IRCClient(host, port)
         await client.connect()
-        await client.join(channel)
-        interval = 120
-        async with trio.open_nursery() as nursery:
-            nursery.start_soon(start_heartbeat, client, interval)
-            async for event in client.events():
-                print(event)
-                if event.type == 'ERR_NICKNAMEINUSE':
-                    await client.handle_nicknameinuse(event.prefix, event.params)
+        async for event in client.events():
+            print(event)
+            if event.type == 'ERR_NICKNAMEINUSE':
+                await client.handle_nicknameinuse()
+            elif event.type == 'RPL_ENDOFMOTD':
+                await client.join(channel)
+            elif event.type == 'JOIN':
+                await client.send_message("PRIVMSG", channel, "hello world")
+                await client.send_message("PRIVMSG", channel, "universe that")
 
 
     trio.run(main)

@@ -8,23 +8,18 @@ A simple IRC framework using trio.
 from irc import IRCClient
 
 async def main():
-    async def start_heartbeat(client, interval):
-        print("sending heartbeat...")
-        while True:
-            await trio.sleep(interval)
-            await client.send_message("PONG", client.hostname)
-
-    host, port, channel = ("irc.freenode.net", 6667, "#bash")
-    client = IRCClient(host, port, channel)
+    host, port, channel = ("irc.freenode.net", 6667, "#dummychan")
+    client = IRCClient(host, port)
     await client.connect()
-    await client.join(channel)
-    interval = 120
-    async with trio.open_nursery() as nursery:
-        nursery.start_soon(start_heartbeat, client, interval)
-        async for event in client.events():
-            print(event)
-            if event.type == 'ERR_NICKNAMEINUSE':
-                await client.handle_nicknameinuse(event.prefix, event.params)
+    async for event in client.events():
+        print(event)
+        if event.type == 'ERR_NICKNAMEINUSE':
+            await client.handle_nicknameinuse()
+        elif event.type == 'RPL_ENDOFMOTD':
+            await client.join(channel)
+        elif event.type == 'JOIN':
+            await client.send_message("PRIVMSG", channel, "hello world")
+            await client.send_message("PRIVMSG", channel, "universe that")
 ```
 
 ### Prerequisites
